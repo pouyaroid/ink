@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تجزیه و تحلیل پوشش جوهر</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=2">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>تجزیه و تحلیل پوشش جوهر</h1>
+            <p class="subtitle">تحلیل پوشش رنگ برای چاپ روی مقوا و بسته‌بندی</p>
+        </header>
+
+        <!-- مرحله ۱: آپلود تصویر -->
+        <section class="card" id="step-upload">
+            <h2>۱. آپلود تصویر</h2>
+            <div class="upload-area" id="upload-area">
+                <input type="file" id="file-input" accept="image/*" hidden>
+                <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">
+                    انتخاب تصویر
+                </button>
+                <p id="upload-info">فایلی انتخاب نشده</p>
+            </div>
+            <div id="image-info" class="info-bar hidden">
+                <span>فایل: <strong id="info-filename"></strong></span>
+                <span>ابعاد: <strong id="info-dims"></strong></span>
+            </div>
+        </section>
+
+        <!-- مرحله ۲: انتخاب ناحیه -->
+        <section class="card hidden" id="step-roi">
+            <h2>۲. انتخاب ناحیه مورد تحلیل (ROI)</h2>
+            <p class="hint">روی تصویر کلیک و درگ کنید تا ناحیه مورد نظر را انتخاب کنید.</p>
+            <div class="canvas-wrapper">
+                <canvas id="image-canvas"></canvas>
+            </div>
+            <div id="roi-info" class="info-bar hidden">
+                <span>ناحیه انتخابی: <strong id="roi-pixels"></strong></span>
+                <button class="btn btn-small" id="btn-clear-roi">پاک کردن انتخاب</button>
+            </div>
+        </section>
+
+        <!-- مرحله ۳: تنظیمات -->
+        <section class="card hidden" id="step-params">
+            <h2>۳. تنظیمات</h2>
+            <div class="params-grid">
+                <div class="param-group">
+                    <h3>ابعاد فیزیکی</h3>
+                    <label>طول (میلی‌متر): <input type="number" id="length-mm" value="700" min="0.1" step="0.1"></label>
+                    <label>عرض (میلی‌متر): <input type="number" id="width-mm" value="500" min="0.1" step="0.1"></label>
+                </div>
+                <div class="param-group">
+                    <h3>تشخیص رنگ</h3>
+                    <label>تعداد رنگ‌ها: <input type="range" id="num-colors" min="2" max="12" value="5">
+                        <span id="num-colors-val">5</span>
+                    </label>
+                    <label>فضای رنگی:
+                        <select id="color-space">
+                            <option value="lab" selected>CIELAB (توصیه شده)</option>
+                            <option value="hsv">HSV</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="param-group">
+                    <h3>حذف پس‌زمینه</h3>
+                    <label>
+                        <input type="checkbox" id="enable-bg" checked>
+                        حذف پس‌زمینه
+                    </label>
+                    <label>میزان تحمل: <input type="range" id="bg-tolerance" min="5" max="80" value="30">
+                        <span id="bg-tolerance-val">30</span>
+                    </label>
+                    <p class="hint">سیستم به صورت خودکار رنگ پس‌زمینه را تشخیص می‌دهد. میزان تحمل را برای شامل/حذف کردن پیکسل‌های بیشتر تنظیم کنید.</p>
+                </div>
+                <div class="param-group">
+                    <h3>پیش‌پردازش</h3>
+                    <label><input type="checkbox" id="apply-gaussian" checked> فیلتر گاوسی</label>
+                    <label>اندازه هسته: <input type="range" id="gaussian-ksize" min="3" max="15" value="5" step="2">
+                        <span id="gaussian-ksize-val">5</span>
+                    </label>
+                    <label><input type="checkbox" id="apply-median"> فیلتر میانه</label>
+                </div>
+            </div>
+            <button class="btn btn-primary btn-large" id="btn-analyze" disabled>تحلیل رنگ‌ها</button>
+        </section>
+
+        <!-- در حال بارگذاری -->
+        <div class="loading hidden" id="loading">
+            <div class="spinner"></div>
+            <p>در حال تحلیل رنگ‌ها...</p>
+        </div>
+
+        <!-- مرحله ۴: نتایج -->
+        <section class="card hidden" id="step-results">
+            <h2>۴. نتایج</h2>
+
+            <div class="results-visual">
+                <div class="vis-panel">
+                    <h3>ناحیه اصلی</h3>
+                    <canvas id="roi-preview"></canvas>
+                </div>
+                <div class="vis-panel">
+                    <h3>تجزیه رنگی</h3>
+                    <canvas id="seg-preview"></canvas>
+                </div>
+            </div>
+
+            <div id="summary" class="info-bar"></div>
+
+            <div class="table-wrapper">
+                <table id="color-table">
+                    <thead>
+                        <tr>
+                            <th>رنگ</th>
+                            <th>پیش‌نمایش</th>
+                            <th>پیکسل</th>
+                            <th>درصد پوشش</th>
+                            <th>مساحت (میلی‌متر مربع)</th>
+                            <th>عملیات</th>
+                        </tr>
+                    </thead>
+                    <tbody id="color-table-body"></tbody>
+                </table>
+            </div>
+
+            <h3>ماسک‌های رنگی</h3>
+            <div id="masks-grid" class="masks-grid"></div>
+
+            <div class="session-actions">
+                <button class="btn btn-primary" id="btn-start-new">شروع جدید</button>
+                <button class="btn btn-danger" id="btn-reset-session">بازنشانی نشست</button>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/js/app.js?v=2"></script>
+</body>
+</html>
