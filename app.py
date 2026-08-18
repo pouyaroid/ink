@@ -22,6 +22,7 @@ from services.image_processor import ImageProcessor
 from services.color_analyzer import ColorAnalyzer
 from services.coverage_calculator import CoverageCalculator
 
+
 UPLOAD_DIR = Path("uploads")
 SESSIONS_DIR = Path("sessions")
 SESSION_EXPIRY_HOURS = 2
@@ -69,7 +70,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 app.mount("/sessions", StaticFiles(directory="sessions"), name="sessions")
 
-templates = Jinja2Templates(directory="templates")
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 processor = ImageProcessor()
 analyzer = ColorAnalyzer()
