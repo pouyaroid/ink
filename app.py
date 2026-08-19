@@ -16,7 +16,6 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.requests import Request
 from typing import Optional
-import base64
 
 from services.image_processor import ImageProcessor
 from services.color_analyzer import ColorAnalyzer
@@ -206,9 +205,6 @@ def analyze_image(
         cv2.imwrite(str(mask_path), cluster.mask)
         masks[cluster.label] = f"/sessions/{session_id}/{mask_filename}"
 
-    _, seg_encoded = cv2.imencode(".jpg", analysis["segmentation_preview"])
-    seg_base64 = base64.b64encode(seg_encoded).decode("utf-8")
-
     def to_native(val):
         if isinstance(val, (np.integer,)):
             return int(val)
@@ -234,7 +230,6 @@ def analyze_image(
         "summary": {k: to_native(v) for k, v in summary.items()},
         "colors": [{k: to_native(v) for k, v in color.items()} for color in results],
         "segmentation_preview": f"/sessions/{session_id}/{seg_filename}",
-        "segmentation_base64": f"data:image/jpeg;base64,{seg_base64}",
         "masks": masks,
     }
 

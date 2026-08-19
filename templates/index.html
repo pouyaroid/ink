@@ -32,8 +32,13 @@
         <!-- مرحله ۲: انتخاب ناحیه -->
         <section class="card hidden" id="step-roi">
             <h2>۲. انتخاب ناحیه مورد تحلیل (ROI)</h2>
-            <p class="hint">روی تصویر کلیک و درگ کنید تا ناحیه مورد نظر را انتخاب کنید.</p>
+            <p class="hint">روی تصویر کلیک و درگ کنید تا ناحیه مورد نظر را انتخاب کنید. برای بزرگ‌نمایی از دکمه‌های ± استفاده کنید.</p>
             <div class="canvas-wrapper">
+                <div class="zoom-bar">
+                    <button class="zoom-btn" id="zoom-out" type="button" title="کوچک‌نمایی">−</button>
+                    <span id="zoom-label" class="zoom-label">100٪</span>
+                    <button class="zoom-btn" id="zoom-in" type="button" title="بزرگ‌نمایی">+</button>
+                </div>
                 <canvas id="image-canvas"></canvas>
             </div>
             <div id="roi-info" class="info-bar hidden">

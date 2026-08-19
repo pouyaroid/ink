@@ -14,6 +14,10 @@ const state = {
     roiOriginal: null,
     analysisResult: null,
     visibleColors: {},
+    maskImages: {},
+    zoom: 1,
+    baseDisplayWidth: 0,
+    baseDisplayHeight: 0,
 };
 
 // ==================== DOM Elements ====================
@@ -37,6 +41,9 @@ const els = {
     gaussianKsizeVal: document.getElementById('gaussian-ksize-val'),
     btnAnalyze: document.getElementById('btn-analyze'),
     btnClearRoi: document.getElementById('btn-clear-roi'),
+    zoomIn: document.getElementById('zoom-in'),
+    zoomOut: document.getElementById('zoom-out'),
+    zoomLabel: document.getElementById('zoom-label'),
     loading: document.getElementById('loading'),
     roiPreview: document.getElementById('roi-preview'),
     segPreview: document.getElementById('seg-preview'),
@@ -53,6 +60,7 @@ let startX = 0;
 let startY = 0;
 
 const ctx = els.canvas.getContext('2d');
+const dpr = window.devicePixelRatio || 1;
 let loadedImage = null;
 
 function initCanvasEvents() {
@@ -60,22 +68,77 @@ function initCanvasEvents() {
     els.canvas.addEventListener('mousemove', onMouseMove);
     els.canvas.addEventListener('mouseup', onMouseUp);
     els.canvas.addEventListener('mouseleave', onMouseUp);
+    els.canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    els.canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    els.canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+}
+
+function canvasPoint(e) {
+    const rect = els.canvas.getBoundingClientRect();
+    return {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+    };
+}
+
+function onTouchStart(e) {
+    if (!loadedImage || e.touches.length !== 1) return;
+    e.preventDefault();
+    const touch = e.touches[0];
+    const pt = canvasPoint(touch);
+    isDrawing = true;
+    startX = pt.x;
+    startY = pt.y;
+}
+
+function onTouchMove(e) {
+    if (!isDrawing || !loadedImage || e.touches.length !== 1) return;
+    e.preventDefault();
+    const touch = e.touches[0];
+    const pt = canvasPoint(touch);
+    updateSelection(pt.x, pt.y);
+}
+
+function onTouchEnd(e) {
+    if (!isDrawing) return;
+    e.preventDefault();
+    onMouseUp({});
+}
+
+function setZoom(nextZoom) {
+    if (!loadedImage) return;
+    state.zoom = Math.max(0.2, Math.min(4, nextZoom));
+    state.displayWidth = Math.round(state.baseDisplayWidth * state.zoom);
+    state.displayHeight = Math.round(state.baseDisplayHeight * state.zoom);
+    els.canvas.width = state.displayWidth * dpr;
+    els.canvas.height = state.displayHeight * dpr;
+    els.canvas.style.width = state.displayWidth + 'px';
+    els.canvas.style.height = state.displayHeight + 'px';
+
+    state.roi = null;
+    state.roiOriginal = null;
+    els.roiInfo.classList.add('hidden');
+    els.stepParams.classList.add('hidden');
+    els.btnAnalyze.disabled = true;
+    redrawCanvas();
+    updateZoomLabel();
 }
 
 function onMouseDown(e) {
     if (!loadedImage) return;
     isDrawing = true;
-    const rect = els.canvas.getBoundingClientRect();
-    startX = e.clientX - rect.left;
-    startY = e.clientY - rect.top;
+    const pt = canvasPoint(e);
+    startX = pt.x;
+    startY = pt.y;
 }
 
 function onMouseMove(e) {
     if (!isDrawing || !loadedImage) return;
-    const rect = els.canvas.getBoundingClientRect();
-    const currentX = e.clientX - rect.left;
-    const currentY = e.clientY - rect.top;
+    const pt = canvasPoint(e);
+    updateSelection(pt.x, pt.y);
+}
 
+function updateSelection(currentX, currentY) {
     const x = Math.min(startX, currentX);
     const y = Math.min(startY, currentY);
     const w = Math.abs(currentX - startX);
@@ -117,14 +180,16 @@ function onMouseUp(e) {
 
 function redrawCanvas() {
     if (!loadedImage) return;
-    ctx.drawImage(loadedImage, 0, 0, els.canvas.width, els.canvas.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, state.displayWidth, state.displayHeight);
+    ctx.drawImage(loadedImage, 0, 0, state.displayWidth, state.displayHeight);
 
     if (state.roi) {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(0, 0, els.canvas.width, state.roi.y);
+        ctx.fillRect(0, 0, state.displayWidth, state.roi.y);
         ctx.fillRect(0, state.roi.y, state.roi.x, state.roi.h);
-        ctx.fillRect(state.roi.x + state.roi.w, state.roi.y, els.canvas.width - state.roi.x - state.roi.w, state.roi.h);
-        ctx.fillRect(0, state.roi.y + state.roi.h, els.canvas.width, els.canvas.height - state.roi.y - state.roi.h);
+        ctx.fillRect(state.roi.x + state.roi.w, state.roi.y, state.displayWidth - state.roi.x - state.roi.w, state.roi.h);
+        ctx.fillRect(0, state.roi.y + state.roi.h, state.displayWidth, state.displayHeight - state.roi.y - state.roi.h);
 
         ctx.strokeStyle = '#00d4ff';
         ctx.lineWidth = 2;
@@ -138,6 +203,12 @@ function redrawCanvas() {
             const label = `${state.roiOriginal.w} × ${state.roiOriginal.h} px`;
             ctx.fillText(label, state.roi.x + 4, state.roi.y - 6);
         }
+    }
+}
+
+function updateZoomLabel() {
+    if (els.zoomLabel) {
+        els.zoomLabel.textContent = `${Math.round(state.zoom * 100)}٪`;
     }
 }
 
@@ -192,16 +263,19 @@ els.fileInput.addEventListener('change', async (e) => {
             loadedImage = img;
 
             const maxDisplayWidth = Math.min(1100, window.innerWidth - 80);
-            const scale = Math.min(maxDisplayWidth / img.width, 1);
-            state.displayWidth = Math.round(img.width * scale);
-            state.displayHeight = Math.round(img.height * scale);
+            const maxDisplayHeight = 600;
+            const scale = Math.min(
+                maxDisplayWidth / img.width,
+                maxDisplayHeight / img.height,
+                1
+            );
+            state.baseDisplayWidth = Math.max(1, Math.round(img.width * scale));
+            state.baseDisplayHeight = Math.max(1, Math.round(img.height * scale));
+            state.zoom = 1;
 
-            els.canvas.width = state.displayWidth;
-            els.canvas.height = state.displayHeight;
-
-            redrawCanvas();
             els.stepRoi.classList.remove('hidden');
             els.stepResults.classList.add('hidden');
+            setZoom(1);
         };
         img.src = data.path;
     } catch (err) {
@@ -290,15 +364,7 @@ function displayResults(data) {
     els.stepResults.classList.remove('hidden');
 
     drawRoiPreview();
-
-    const segImg = new Image();
-    segImg.onload = () => {
-        const segCtx = els.segPreview.getContext('2d');
-        els.segPreview.width = segImg.width;
-        els.segPreview.height = segImg.height;
-        segCtx.drawImage(segImg, 0, 0);
-    };
-    segImg.src = data.segmentation_base64;
+    renderSegmentationPreview();
 
     const s = data.summary;
     els.summary.innerHTML = `
@@ -334,6 +400,7 @@ function displayResults(data) {
             state.visibleColors[color.name] = !state.visibleColors[color.name];
             e.target.classList.toggle('active');
             e.target.textContent = state.visibleColors[color.name] ? 'نمایش' : 'پنهان';
+            renderSegmentationPreview();
         });
 
         row.querySelector('[data-action="mask"]').addEventListener('click', () => {
@@ -362,6 +429,82 @@ function drawRoiPreview() {
     );
 }
 
+// ==================== Segmentation Preview ====================
+let segRenderToken = 0;
+
+function loadMaskImage(url, cb) {
+    if (state.maskImages[url]) {
+        cb(state.maskImages[url]);
+        return;
+    }
+    const img = new Image();
+    img.onload = () => {
+        state.maskImages[url] = img;
+        cb(img);
+    };
+    img.src = url;
+}
+
+function tintedMaskLayer(maskImg, rgb, w, h) {
+    const temp = document.createElement('canvas');
+    temp.width = w;
+    temp.height = h;
+    const tctx = temp.getContext('2d');
+    tctx.drawImage(maskImg, 0, 0, w, h);
+
+    const maskData = tctx.getImageData(0, 0, w, h).data;
+    const out = tctx.createImageData(w, h);
+    for (let i = 0; i < maskData.length; i += 4) {
+        if (maskData[i] > 128) {
+            out.data[i] = rgb[0];
+            out.data[i + 1] = rgb[1];
+            out.data[i + 2] = rgb[2];
+            out.data[i + 3] = 255;
+        } else {
+            out.data[i + 3] = 0;
+        }
+    }
+    return out;
+}
+
+function renderSegmentationPreview() {
+    const data = state.analysisResult;
+    if (!data || !state.roiOriginal) return;
+
+    const token = ++segRenderToken;
+    const colors = data.colors;
+    const visible = colors.filter((c) => state.visibleColors[c.name] === true);
+
+    const roiW = state.roiOriginal.w;
+    const roiH = state.roiOriginal.h;
+    const scale = Math.min(800 / roiW, 600 / roiH, 1);
+    const w = Math.max(1, Math.round(roiW * scale));
+    const h = Math.max(1, Math.round(roiH * scale));
+
+    els.segPreview.width = w;
+    els.segPreview.height = h;
+    const segCtx = els.segPreview.getContext('2d');
+    segCtx.fillStyle = '#1a1a2e';
+    segCtx.fillRect(0, 0, w, h);
+
+    if (visible.length === 0) return;
+
+    let remaining = visible.length;
+    visible.forEach((color) => {
+        const rgb = color.representative_color_rgb;
+        const url = data.masks[color.name];
+        if (!url) {
+            remaining--;
+            return;
+        }
+        loadMaskImage(url, (maskImg) => {
+            if (token !== segRenderToken) return;
+            segCtx.putImageData(tintedMaskLayer(maskImg, rgb, w, h), 0, 0);
+            remaining--;
+        });
+    });
+}
+
 // ==================== Masks Grid ====================
 function drawMasksGrid(data) {
     els.masksGrid.innerHTML = '';
@@ -384,8 +527,7 @@ function drawMasksGrid(data) {
         const maskCtx = canvas.getContext('2d');
 
         if (data.masks && data.masks[color.name]) {
-            const maskImg = new Image();
-            maskImg.onload = () => {
+            loadMaskImage(data.masks[color.name], (maskImg) => {
                 canvas.width = maskImg.width;
                 canvas.height = maskImg.height;
 
@@ -412,8 +554,7 @@ function drawMasksGrid(data) {
                     }
                 }
                 maskCtx.putImageData(colored, 0, 0);
-            };
-            maskImg.src = data.masks[color.name];
+            });
         }
     });
 }
@@ -428,23 +569,30 @@ function showMask(colorName) {
 }
 
 // ==================== Start New ====================
-els.btnStartNew.addEventListener('click', () => {
+function resetToUpload() {
     state.filename = null;
     state.sessionId = null;
     state.originalWidth = 0;
     state.originalHeight = 0;
     state.displayWidth = 0;
     state.displayHeight = 0;
+    state.baseDisplayWidth = 0;
+    state.baseDisplayHeight = 0;
+    state.zoom = 1;
     state.roi = null;
     state.roiOriginal = null;
     state.analysisResult = null;
     state.visibleColors = {};
+    state.maskImages = {};
 
     loadedImage = null;
 
     els.canvas.width = 1;
     els.canvas.height = 1;
+    els.canvas.style.width = '';
+    els.canvas.style.height = '';
     ctx.clearRect(0, 0, 1, 1);
+    updateZoomLabel();
 
     els.fileInput.value = '';
     els.uploadInfo.textContent = 'فایلی انتخاب نشده';
@@ -472,31 +620,36 @@ els.btnStartNew.addEventListener('click', () => {
     els.colorTableBody.innerHTML = '';
     els.masksGrid.innerHTML = '';
     els.summary.innerHTML = '';
+}
+
+els.btnStartNew.addEventListener('click', async () => {
+    resetToUpload();
+    await cleanupSession();
 });
 
 // ==================== Reset Session ====================
 els.btnResetSession.addEventListener('click', async () => {
-    if (!state.sessionId) return;
+    const sessionId = state.sessionId;
+    const filename = state.filename;
+
+    resetToUpload();
+
+    if (!sessionId) return;
 
     const formData = new FormData();
-    formData.append('session_id', state.sessionId);
-    if (state.filename) {
-        formData.append('filename', state.filename);
+    formData.append('session_id', sessionId);
+    if (filename) {
+        formData.append('filename', filename);
     }
-
-    state.sessionId = null;
-    state.filename = null;
-    state.analysisResult = null;
-
-    els.colorTableBody.innerHTML = '';
-    els.masksGrid.innerHTML = '';
-    els.summary.innerHTML = '';
-    els.stepResults.classList.add('hidden');
 
     try {
         await fetch('/reset-session', { method: 'POST', body: formData });
     } catch (_) { /* best-effort */ }
 });
+
+// ==================== Zoom Controls ====================
+els.zoomIn.addEventListener('click', () => setZoom(state.zoom * 1.25));
+els.zoomOut.addEventListener('click', () => setZoom(state.zoom / 1.25));
 
 // ==================== Init ====================
 initCanvasEvents();

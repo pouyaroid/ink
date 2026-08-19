@@ -172,6 +172,43 @@ header h1 {
     background: #111;
 }
 
+.zoom-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #0f3460;
+    border-bottom: 1px solid #1a3a5c;
+    padding: 6px 12px;
+}
+
+.zoom-btn {
+    width: 28px;
+    height: 28px;
+    border: 1px solid #2a4a6c;
+    border-radius: 4px;
+    background: #1a1a2e;
+    color: #00d4ff;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.zoom-btn:hover {
+    background: #254a6e;
+    color: #fff;
+}
+
+.zoom-label {
+    color: #ccc;
+    font-size: 0.85rem;
+    min-width: 44px;
+    text-align: center;
+}
+
 #image-canvas {
     display: block;
     cursor: crosshair;
