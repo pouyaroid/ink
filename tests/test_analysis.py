@@ -143,11 +143,11 @@ def run_test(name, image, expected_colors, expected_coverage_range, width_cm=70,
     print(f"\n  ROI: Full image ({w} × {h})")
     print(f"  Physical: {width_cm} × {height_cm} cm = {total_area_cm2} cm²")
     print(f"  Detected {len(areas)} color groups:")
-    print(f"  {'Color':<20} {'Pixels':>10} {'Coverage':>10} {'Area cm²':>10}")
+    print(f"  {'Color':<20} {'Pixels':>10} {'Coverage':>10} {'Area mm²':>10}")
     print(f"  {'-' * 55}")
 
     for c in areas:
-        print(f"  {c['name']:<20} {c['pixel_count']:>10,} {c['coverage_percent']:>9}% {c['area_cm2']:>10,.2f}")
+        print(f"  {c['name']:<20} {c['pixel_count']:>10,} {c['coverage_percent']:>9}% {c['area_mm2']:>10,.2f}")
 
     # Validate
     all_coverage = sum(c["coverage_percent"] for c in areas)

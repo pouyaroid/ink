@@ -63,6 +63,30 @@ def classify_color_name(bgr: Tuple[int, int, int]) -> str:
         return "RED"
 
 
+def _bgr_to_lab(color_bgr: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Convert a single BGR color to 8-bit CIELAB as used by OpenCV."""
+    pixel = np.uint8([[[color_bgr[0], color_bgr[1], color_bgr[2]]]])
+    lab = cv2.cvtColor(pixel, cv2.COLOR_BGR2Lab)[0][0]
+    return (int(lab[0]), int(lab[1]), int(lab[2]))
+
+
+def _color_lab_distance(
+    color_bgr: Tuple[int, int, int],
+    lab_b: Tuple[int, int, int],
+) -> float:
+    """CIE76 (Euclidean) distance between a BGR color and a LAB color.
+
+    Distances are computed in 8-bit CIELAB (L, a, b each 0-255), which is
+    perceptually far more meaningful than raw BGR channel differences: two
+    visually similar colors get a small distance and two visually different
+    colors get a large one. This is used only for background detection; the
+    color clustering itself is untouched.
+    """
+    lab_a = np.array(_bgr_to_lab(color_bgr), dtype=np.float32)
+    lab_b = np.array(lab_b, dtype=np.float32)
+    return float(np.sqrt(np.sum((lab_a - lab_b) ** 2)))
+
+
 class ColorAnalyzer:
 
     def __init__(self):
@@ -77,6 +101,17 @@ class ColorAnalyzer:
         elif color_space == "hsv":
             hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
             features = hsv.reshape(-1, 3).astype(np.float32)
+            # OpenCV stores Hue in 0-179 while Saturation and Value use
+            # 0-255.  To prevent KMeans from over-weighting the Hue channel
+            # (whose range is ~70% of the other two), we scale Hue to
+            # 0-89.5 by dividing by 2 so all three channels occupy a
+            # similar numeric range during clustering.
+            #
+            # IMPORTANT: This transformation MUST be reversed in
+            # get_representative_colors() (multiply by 2) before the
+            # cluster centers are converted back to BGR via OpenCV.
+            # Without the reversal a blue pixel (H≈120) would be
+            # clustered as H≈60 and decoded as green.
             features[:, 0] *= 0.5
             return features
         else:
@@ -118,13 +153,28 @@ class ColorAnalyzer:
     def get_representative_colors(
         self, kmeans, color_space: str = "lab"
     ) -> List[Tuple[int, int, int]]:
-        centers = kmeans.cluster_centers_
+        # Work on a copy so the KMeans model's centers are not mutated.
+        centers = kmeans.cluster_centers_.copy()
 
         if color_space == "lab":
+            # CIELAB centers are already in 8-bit OpenCV range (L, a, b all
+            # 0-255), so they can be cast straight to uint8 and converted.
             centers_uint8 = centers.astype(np.uint8).reshape(-1, 1, 3)
             bgr_centers = cv2.cvtColor(centers_uint8, cv2.COLOR_Lab2BGR)
             return [tuple(int(v) for v in c[0]) for c in bgr_centers]
         elif color_space == "hsv":
+            # Reverse the Hue halving applied in prepare_features().
+            # The cluster centers are in the scaled space (H/2, S, V)
+            # so we multiply Hue by 2 to restore real OpenCV values.
+            # Without this, e.g. a blue with H≈120 would be clustered
+            # as H≈60 and decoded back as green.
+            centers[:, 0] *= 2.0
+            # Clip each channel to its valid OpenCV HSV range:
+            #   H: 0–179,  S: 0–255,  V: 0–255
+            # A uniform clip to 255 is NOT correct because Hue values
+            # above 179 would be interpreted as different hues by
+            # cv2.COLOR_HSV2BGR (wrapping or producing wrong colors).
+            centers = np.clip(centers, [0, 0, 0], [179, 255, 255])
             centers_uint8 = centers.astype(np.uint8).reshape(-1, 1, 3)
             bgr_centers = cv2.cvtColor(centers_uint8, cv2.COLOR_HSV2BGR)
             return [tuple(int(v) for v in c[0]) for c in bgr_centers]
@@ -168,6 +218,12 @@ class ColorAnalyzer:
         rep_colors = self.get_representative_colors(kmeans, color_space)
         seg_preview = self.create_segmentation_preview(roi_bgr, labels, rep_colors)
 
+        # Background is supplied (or auto-detected) in BGR. Convert it to
+        # CIELAB once so every cluster comparison below is perceptual.
+        bg_lab = None
+        if background_color is not None:
+            bg_lab = _bgr_to_lab(background_color)
+
         clusters = []
         unique_labels, counts = np.unique(labels, return_counts=True)
 
@@ -182,10 +238,14 @@ class ColorAnalyzer:
             name = classify_color_name(bgr)
 
             is_background = False
-            if background_color is not None:
-                diff = np.sqrt(
-                    sum((int(a) - int(b)) ** 2 for a, b in zip(bgr, background_color))
-                )
+            if bg_lab is not None:
+                # Compare in CIELAB instead of BGR: the LAB distance matches
+                # how humans perceive color differences, so the same tolerance
+                # value now cleanly separates a background from printed colors
+                # that merely *look* different from it. The tolerance is in
+                # 8-bit LAB units (each channel 0-255); the default 30 is a
+                # moderate perceptual threshold.
+                diff = _color_lab_distance(bgr, bg_lab)
                 is_background = diff < background_tolerance
 
             cluster = ColorCluster(
