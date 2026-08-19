@@ -76,7 +76,8 @@ header h1 {
     transition: border-color 0.3s;
 }
 
-.upload-area:hover {
+.upload-area:hover,
+.upload-area.drag-over {
     border-color: #00d4ff;
 }
 

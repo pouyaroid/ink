@@ -23,6 +23,7 @@ const state = {
 // ==================== DOM Elements ====================
 const els = {
     fileInput: document.getElementById('file-input'),
+    uploadArea: document.getElementById('upload-area'),
     uploadInfo: document.getElementById('upload-info'),
     imageInfo: document.getElementById('image-info'),
     infoFilename: document.getElementById('info-filename'),
@@ -233,6 +234,71 @@ window.addEventListener('beforeunload', () => {
 // ==================== File Upload ====================
 els.fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
+    if (!file) return;
+
+    await cleanupSession();
+    els.uploadInfo.textContent = 'در حال آپلود...';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const resp = await fetch('/upload', { method: 'POST', body: formData });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            throw new Error(data.detail || 'آپلود ناموفق بود');
+        }
+
+        state.filename = data.filename;
+        state.originalWidth = data.width;
+        state.originalHeight = data.height;
+
+        els.infoFilename.textContent = file.name;
+        els.infoDims.textContent = `${data.width} × ${data.height} پیکسل`;
+        els.imageInfo.classList.remove('hidden');
+        els.uploadInfo.textContent = file.name;
+
+        const img = new Image();
+        img.onload = () => {
+            loadedImage = img;
+
+            const maxDisplayWidth = Math.min(1100, window.innerWidth - 80);
+            const maxDisplayHeight = 600;
+            const scale = Math.min(
+                maxDisplayWidth / img.width,
+                maxDisplayHeight / img.height,
+                1
+            );
+            state.baseDisplayWidth = Math.max(1, Math.round(img.width * scale));
+            state.baseDisplayHeight = Math.max(1, Math.round(img.height * scale));
+            state.zoom = 1;
+
+            els.stepRoi.classList.remove('hidden');
+            els.stepResults.classList.add('hidden');
+            setZoom(1);
+        };
+        img.src = data.path;
+    } catch (err) {
+        els.uploadInfo.textContent = `خطا: ${err.message}`;
+    }
+});
+
+// ==================== Drag and Drop ====================
+els.uploadArea.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    els.uploadArea.classList.add('drag-over');
+});
+
+els.uploadArea.addEventListener('dragleave', () => {
+    els.uploadArea.classList.remove('drag-over');
+});
+
+els.uploadArea.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    els.uploadArea.classList.remove('drag-over');
+
+    const file = e.dataTransfer.files[0];
     if (!file) return;
 
     await cleanupSession();
