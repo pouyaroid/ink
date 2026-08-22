@@ -112,14 +112,32 @@ async def upload_image(file: UploadFile = File(...)):
 
 
 def _get_dominant_color(image: np.ndarray) -> tuple:
-    """Find the most common color in the image by simple binning."""
-    small = cv2.resize(image, (64, 64), interpolation=cv2.INTER_AREA)
-    pixels = small.reshape(-1, 3)
-    # Quantize to reduce unique colors
-    quantized = (pixels // 16) * 16
+    """Estimate the unprinted stock color from the ROI's border ring.
+
+    Printed content is normally surrounded by bare stock, so sampling only
+    the outer ~5% border identifies the background even when ink covers
+    most of the ROI. (Taking the dominant color of the whole image — the
+    previous behavior — mistook the ink itself for the background whenever
+    printed area exceeded 50%.)
+
+    The mean of all border pixels in the winning quantization bin is
+    returned instead of the bin's floor value for sub-bin accuracy.
+    """
+    h, w = image.shape[:2]
+    bw = max(1, int(min(h, w) * 0.05))
+    ring = np.zeros((h, w), dtype=bool)
+    ring[:bw, :] = True
+    ring[h - bw:, :] = True
+    ring[:, :bw] = True
+    ring[:, w - bw:] = True
+
+    border = image[ring].astype(np.int32)
+    quantized = (border // 16) * 16
     unique, counts = np.unique(quantized, axis=0, return_counts=True)
-    dominant = unique[np.argmax(counts)]
-    return (int(dominant[0]), int(dominant[1]), int(dominant[2]))
+    dominant_bin = unique[np.argmax(counts)]
+    members = border[np.all(quantized == dominant_bin, axis=1)]
+    mean = members.mean(axis=0) if len(members) else dominant_bin
+    return tuple(int(round(v)) for v in mean)
 
 
 @app.post("/analyze")
@@ -137,7 +155,7 @@ def analyze_image(
     background_g: Optional[int] = Form(None),
     background_b: Optional[int] = Form(None),
     background_tolerance: int = Form(30),
-    apply_gaussian: bool = Form(True),
+    apply_gaussian: bool = Form(False),
     gaussian_ksize: int = Form(5),
     apply_median: bool = Form(False),
     median_ksize: int = Form(5),
@@ -146,6 +164,16 @@ def analyze_image(
     filepath = UPLOAD_DIR / filename
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="Image not found")
+
+    # Validate inputs that directly affect coverage percentages.
+    if length_mm <= 0 or width_mm <= 0:
+        raise HTTPException(
+            status_code=400, detail="Physical dimensions must be positive"
+        )
+    if not 0 <= background_tolerance <= 100:
+        raise HTTPException(
+            status_code=400, detail="background_tolerance must be 0-100"
+        )
 
     session_id = uuid.uuid4().hex
     session_dir = SESSIONS_DIR / session_id

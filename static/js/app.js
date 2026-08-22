@@ -678,7 +678,7 @@ function resetToUpload() {
     document.getElementById('enable-bg').checked = true;
     els.bgTolerance.value = 30;
     els.bgToleranceVal.textContent = '30';
-    document.getElementById('apply-gaussian').checked = true;
+    document.getElementById('apply-gaussian').checked = false;
     els.gaussianKsize.value = 5;
     els.gaussianKsizeVal.textContent = '5';
     document.getElementById('apply-median').checked = false;

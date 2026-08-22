@@ -267,6 +267,104 @@ def test_coverage_percentages_accurate():
     assert abs(blue[0]["area_mm2"] - 1750.0) < 70.0, f"blue area {blue[0]['area_mm2']:.2f}"
 
 
+# ----------------------- Percentage precision regressions -----------------------
+
+
+def test_full_res_assignment_counts_thin_lines_exactly():
+    """Regression: ROIs above MAX_CLUSTER_PIXELS must still count every pixel.
+
+    A 1-px grid at a 40-px pitch on 800x600 has 20*600 + 15*800 - 300
+    intersections = 23,700 gray pixels (4.9375%). The old pipeline fitted
+    labels on a downsampled image and upscaled them with INTER_NEAREST,
+    which quantized coverage into blocks and miscounted such details.
+    """
+    w, h, pitch = 800, 600, 40
+    img = np.full((h, w, 3), 240, dtype=np.uint8)
+    for i in range(0, w, pitch):
+        img[:, i] = 100
+    for j in range(0, h, pitch):
+        img[j, :] = 100
+
+    res = analyzer.analyze_colors(img, n_colors=2, color_space="lab")
+    gray = [c for c in res["clusters"] if c.label.startswith("GRAY")]
+    assert gray, "gray grid cluster missing"
+    truth = 20 * h + 15 * w - 20 * 15
+    err_pct = abs(gray[0].pixel_count - truth) / truth * 100
+    assert err_pct < 5.0, (
+        f"thin lines miscounted: {gray[0].pixel_count} vs {truth} "
+        f"({err_pct:.1f}% error)"
+    )
+
+
+def test_multiple_background_clusters_merge_to_one():
+    """Regression: several background-colored clusters must yield ONE entry.
+
+    Previously each stayed named 'BACKGROUND' and the per-color mask
+    dictionary keyed by name silently dropped all but the last one.
+    """
+    # Two different paper-like tones, both within tolerance of the given bg.
+    img = np.zeros((60, 120, 3), dtype=np.uint8)
+    img[:, :60] = (240, 240, 240)
+    img[:, 60:] = (230, 230, 230)
+
+    res = analyzer.analyze_colors(
+        img, n_colors=3, color_space="lab",
+        background_color=(238, 238, 238), background_tolerance=10,
+    )
+    bgs = [c for c in res["clusters"] if c.label == "BACKGROUND"
+           or c.label.startswith("BACKGROUND_")]
+    assert len(bgs) <= 1, f"background not unified: {[c.label for c in bgs]}"
+    if bgs:
+        expected = sum(c.pixel_count for c in res["clusters"]
+                       if c.label == bgs[0].label)
+        assert bgs[0].pixel_count == expected
+
+
+def test_tiny_roi_does_not_crash():
+    """Regression: fewer pixels than n_colors must degrade gracefully."""
+    tiny = np.zeros((2, 2, 3), dtype=np.uint8)
+    tiny[:] = (0, 0, 255)
+    res = analyzer.analyze_colors(tiny, n_colors=8, color_space="lab")
+    total = sum(c.pixel_count for c in res["clusters"])
+    assert total == 4, f"expected 4 pixels accounted for, got {total}"
+
+
+def test_lab_distance_is_true_delta_e():
+    """Regression: equal-magnitude L* and chroma steps must weigh equally.
+
+    In OpenCV's 8-bit Lab encoding a pure L* step of 10 measured ~25.5
+    (L is stored scaled by 255/100) while a pure a*/b* step of 10
+    measured ~10 (channels are merely shifted by +128). Floating-point
+    CIELAB must measure both as ~10.
+    """
+    def bgr_from_lab(l, a, bb):
+        px = np.array([[[l, a, bb]]], dtype=np.float32)
+        out = cv2.cvtColor(px, cv2.COLOR_Lab2BGR)[0][0]
+        return tuple(int(v) for v in np.clip(np.rint(out * 255.0), 0, 255))
+
+    base = (50.0, 10.0, 0.0)
+    d_light = _color_lab_distance(bgr_from_lab(60.0, 10.0, 0.0), base)
+    d_chroma = _color_lab_distance(bgr_from_lab(50.0, 20.0, 0.0), base)
+
+    assert abs(d_light - 10.0) < 1.0, f"L* step of 10 measured {d_light}"
+    assert abs(d_chroma - 10.0) < 1.0, f"a* step of 10 measured {d_chroma}"
+    assert abs(d_light - d_chroma) < 1.0, (
+        f"lightness/chroma imbalance persists: {d_light} vs {d_chroma}"
+    )
+
+
+def test_coverage_sums_exactly_100_on_large_roi():
+    """Full-resolution assignment must account for every single pixel."""
+    rng = np.random.default_rng(7)
+    img = np.zeros((500, 500, 3), dtype=np.uint8)
+    img[:250] = (255, 0, 0)          # blue half
+    img[250:] = (40, 80, 120)        # brown half
+    noise = rng.integers(0, 2, (500, 500)) * np.uint8(0)  # keep deterministic
+    res = analyzer.analyze_colors(img, n_colors=4, color_space="lab")
+    total = sum(c.pixel_count for c in res["clusters"])
+    assert total == 250_000, f"pixels lost/gained: {total}"
+
+
 def _run_all():
     tests = [
         (name, fn) for name, fn in sorted(globals().items())

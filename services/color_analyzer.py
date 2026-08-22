@@ -63,28 +63,41 @@ def classify_color_name(bgr: Tuple[int, int, int]) -> str:
         return "RED"
 
 
-def _bgr_to_lab(color_bgr: Tuple[int, int, int]) -> Tuple[int, int, int]:
-    """Convert a single BGR color to 8-bit CIELAB as used by OpenCV."""
-    pixel = np.uint8([[[color_bgr[0], color_bgr[1], color_bgr[2]]]])
+def _bgr_to_lab(color_bgr: Tuple[int, int, int]) -> Tuple[float, float, float]:
+    """Convert a single BGR color to floating-point CIELAB.
+
+    Floating point conversion yields true CIE L* (0-100) and a*/b*
+    (-127..127). OpenCV's 8-bit Lab encoding instead scales L by 255/100
+    while leaving a/b as shifted bytes (+128), so Euclidean distances in
+    8-bit Lab amplify lightness differences by ~2.55x relative to chromatic
+    ones. Using real CIELAB coordinates keeps distances perceptually valid.
+    """
+    pixel = np.array(
+        [[[color_bgr[0], color_bgr[1], color_bgr[2]]]], dtype=np.float32
+    ) / 255.0
     lab = cv2.cvtColor(pixel, cv2.COLOR_BGR2Lab)[0][0]
-    return (int(lab[0]), int(lab[1]), int(lab[2]))
+    return (float(lab[0]), float(lab[1]), float(lab[2]))
 
 
 def _color_lab_distance(
     color_bgr: Tuple[int, int, int],
-    lab_b: Tuple[int, int, int],
+    lab_b: Tuple[float, float, float],
 ) -> float:
-    """CIE76 (Euclidean) distance between a BGR color and a LAB color.
+    """CIE76 (Euclidean) Delta-E between a BGR color and a LAB color.
 
-    Distances are computed in 8-bit CIELAB (L, a, b each 0-255), which is
-    perceptually far more meaningful than raw BGR channel differences: two
-    visually similar colors get a small distance and two visually different
-    colors get a large one. This is used only for background detection; the
-    color clustering itself is untouched.
+    Distances are computed in floating-point CIELAB, i.e. this is a true
+    CIE76 Delta-E where ~1.0 is one just-noticeable difference and 100 is
+    roughly the distance between black and white. This is used only for
+    background detection; the color clustering itself is untouched.
     """
     lab_a = np.array(_bgr_to_lab(color_bgr), dtype=np.float32)
     lab_b = np.array(lab_b, dtype=np.float32)
     return float(np.sqrt(np.sum((lab_a - lab_b) ** 2)))
+
+
+def _is_background_name(label: str) -> bool:
+    """True for any background cluster name ('BACKGROUND', 'BACKGROUND_2', ...)."""
+    return label == "BACKGROUND" or label.startswith("BACKGROUND_")
 
 
 class ColorAnalyzer:
@@ -96,8 +109,13 @@ class ColorAnalyzer:
         self, roi_bgr: np.ndarray, color_space: str = "lab"
     ) -> np.ndarray:
         if color_space == "lab":
-            lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2Lab)
-            return lab.reshape(-1, 3).astype(np.float32)
+            # Floating-point CIELAB (L in 0-100, a/b in -127..127). The 8-bit
+            # encoding scales L by 255/100 but only offsets a/b by +128, which
+            # stretches the lightness axis ~2.55x and skews both KMeans
+            # distances and background detection. Float LAB keeps all three
+            # axes in their true perceptual proportions.
+            lab = cv2.cvtColor(roi_bgr.astype(np.float32) / 255.0, cv2.COLOR_BGR2Lab)
+            return lab.reshape(-1, 3)
         elif color_space == "hsv":
             hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
             features = hsv.reshape(-1, 3).astype(np.float32)
@@ -139,8 +157,12 @@ class ColorAnalyzer:
     ) -> Tuple[np.ndarray, MiniBatchKMeans]:
         features = self.prepare_features(roi_bgr, color_space)
 
+        # KMeans requires at least as many samples as clusters; tiny ROIs
+        # must degrade gracefully instead of raising inside sklearn.
+        effective_k = max(1, min(n_colors, features.shape[0]))
+
         kmeans = MiniBatchKMeans(
-            n_clusters=n_colors,
+            n_clusters=effective_k,
             random_state=42,
             max_iter=max_iter,
             n_init=n_init,
@@ -150,6 +172,27 @@ class ColorAnalyzer:
 
         return labels.reshape(roi_bgr.shape[:2]), kmeans
 
+    @staticmethod
+    def _assign_nearest_labels(
+        features: np.ndarray, centers: np.ndarray, chunk_size: int = 262_144
+    ) -> np.ndarray:
+        """Assign every pixel to its nearest cluster center.
+
+        Works on chunks so the (N, k, 3) difference tensor stays small even
+        for very large ROIs. This is what allows clustering to be *fitted*
+        on a downsampled image while coverage is still computed from every
+        full-resolution pixel exactly.
+        """
+        centers = np.asarray(centers, dtype=np.float32)
+        n = features.shape[0]
+        labels = np.empty(n, dtype=np.int32)
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            block = features[start:end]
+            dists = ((block[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+            labels[start:end] = np.argmin(dists, axis=1)
+        return labels
+
     def get_representative_colors(
         self, kmeans, color_space: str = "lab"
     ) -> List[Tuple[int, int, int]]:
@@ -157,11 +200,15 @@ class ColorAnalyzer:
         centers = kmeans.cluster_centers_.copy()
 
         if color_space == "lab":
-            # CIELAB centers are already in 8-bit OpenCV range (L, a, b all
-            # 0-255), so they can be cast straight to uint8 and converted.
-            centers_uint8 = centers.astype(np.uint8).reshape(-1, 1, 3)
-            bgr_centers = cv2.cvtColor(centers_uint8, cv2.COLOR_Lab2BGR)
-            return [tuple(int(v) for v in c[0]) for c in bgr_centers]
+            # Centers are floating-point CIELAB; decode through OpenCV's
+            # float path (expects L in 0-100, a/b in -127..127) which
+            # returns linear BGR in 0-1. Round instead of truncating to
+            # keep representative colors accurate to within half a step.
+            bgr01 = cv2.cvtColor(
+                centers.astype(np.float32).reshape(-1, 1, 3), cv2.COLOR_Lab2BGR
+            )
+            bgr255 = np.clip(np.rint(bgr01 * 255.0), 0, 255).astype(np.uint8)
+            return [tuple(int(v) for v in c[0]) for c in bgr255]
         elif color_space == "hsv":
             # Reverse the Hue halving applied in prepare_features().
             # The cluster centers are in the scaled space (H/2, S, V)
@@ -175,9 +222,11 @@ class ColorAnalyzer:
             # above 179 would be interpreted as different hues by
             # cv2.COLOR_HSV2BGR (wrapping or producing wrong colors).
             centers = np.clip(centers, [0, 0, 0], [179, 255, 255])
-            centers_uint8 = centers.astype(np.uint8).reshape(-1, 1, 3)
+            centers_uint8 = np.rint(centers).astype(np.uint8).reshape(-1, 1, 3)
             bgr_centers = cv2.cvtColor(centers_uint8, cv2.COLOR_HSV2BGR)
             return [tuple(int(v) for v in c[0]) for c in bgr_centers]
+        else:
+            raise ValueError(f"Unsupported color space: {color_space}")
 
     def create_segmentation_preview(
         self,
@@ -203,17 +252,20 @@ class ColorAnalyzer:
         h, w = roi_bgr.shape[:2]
         total_pixels = h * w
 
-        small_img, scale = self._downsample_image(roi_bgr)
-        labels_small, kmeans = self.cluster_colors(
-            small_img, n_colors, color_space
-        )
+        # Fit KMeans on at most MAX_CLUSTER_PIXELS sampled pixels (speed),
+        # then assign EVERY full-resolution pixel to its nearest center in
+        # the same feature space. The previous approach upscaled the
+        # downsampled label map with INTER_NEAREST, which quantized
+        # coverage into blocks of ~(1/scale)^2 pixels: thin strokes, text
+        # and halftone dots vanished or were miscounted. Exact per-pixel
+        # assignment keeps coverage percentages accurate.
+        small_img, _scale = self._downsample_image(roi_bgr)
+        _, kmeans = self.cluster_colors(small_img, n_colors, color_space)
 
-        if scale < 1.0:
-            labels = cv2.resize(
-                labels_small, (w, h), interpolation=cv2.INTER_NEAREST
-            )
-        else:
-            labels = labels_small
+        features_full = self.prepare_features(roi_bgr, color_space)
+        labels = self._assign_nearest_labels(
+            features_full, kmeans.cluster_centers_
+        ).reshape(h, w)
 
         rep_colors = self.get_representative_colors(kmeans, color_space)
         seg_preview = self.create_segmentation_preview(roi_bgr, labels, rep_colors)
@@ -231,6 +283,7 @@ class ColorAnalyzer:
         unique_labels = unique_labels[sort_idx]
         counts = counts[sort_idx]
 
+        bg_seen = 0
         for label_id, count in zip(unique_labels, counts):
             label_id = int(label_id)
             count = int(count)
@@ -239,17 +292,23 @@ class ColorAnalyzer:
 
             is_background = False
             if bg_lab is not None:
-                # Compare in CIELAB instead of BGR: the LAB distance matches
-                # how humans perceive color differences, so the same tolerance
-                # value now cleanly separates a background from printed colors
-                # that merely *look* different from it. The tolerance is in
-                # 8-bit LAB units (each channel 0-255); the default 30 is a
-                # moderate perceptual threshold.
+                # Compare in true CIELAB (CIE76 Delta-E): the tolerance is
+                # now in perceptually meaningful units where ~1.0 is one
+                # just-noticeable difference, instead of the distorted
+                # 8-bit Lab scale that amplified lightness ~2.55x.
                 diff = _color_lab_distance(bgr, bg_lab)
                 is_background = diff < background_tolerance
 
+            if is_background:
+                # Give every background cluster a unique name so masks are
+                # never lost to dict-key collisions downstream.
+                bg_seen += 1
+                label = "BACKGROUND" if bg_seen == 1 else f"BACKGROUND_{bg_seen}"
+            else:
+                label = f"{name}_{label_id}"
+
             cluster = ColorCluster(
-                label=f"{name}_{label_id}" if not is_background else "BACKGROUND",
+                label=label,
                 representative_color_bgr=tuple(int(v) for v in bgr),
                 representative_color_rgb=tuple(int(v) for v in (bgr[2], bgr[1], bgr[0])),
                 pixel_count=count,
@@ -260,8 +319,8 @@ class ColorAnalyzer:
             )
             clusters.append(cluster)
 
-        bg_clusters = [c for c in clusters if c.label == "BACKGROUND"]
-        non_bg_clusters = [c for c in clusters if c.label != "BACKGROUND"]
+        bg_clusters = [c for c in clusters if _is_background_name(c.label)]
+        non_bg_clusters = [c for c in clusters if not _is_background_name(c.label)]
         clusters = non_bg_clusters + bg_clusters
 
         clusters = self._merge_duplicate_names(clusters, total_pixels)
@@ -286,11 +345,21 @@ class ColorAnalyzer:
         merged = []
 
         for c in clusters:
-            base_name = c.label.split("_")[0] if "_" in c.label else c.label
-
-            if c.label == "BACKGROUND":
-                merged.append(c)
-                continue
+            # All background variants ('BACKGROUND', 'BACKGROUND_2', ...)
+            # deliberately share one merge key, so multiple paper-colored
+            # clusters combine into a single exact-count BACKGROUND entry
+            # instead of colliding in the per-color mask dictionary.
+            if _is_background_name(c.label):
+                base_name = "BACKGROUND"
+            else:
+                # Non-background labels are always "<color>_<cluster_id>",
+                # so stripping the trailing id recovers the exact color
+                # name. Splitting on the FIRST underscore would wrongly
+                # collapse distinct colors such as YELLOW_GREEN into
+                # YELLOW and corrupt their coverage percentages.
+                base_name = (
+                    c.label.rsplit("_", 1)[0] if "_" in c.label else c.label
+                )
 
             if base_name not in name_map:
                 name_map[base_name] = c

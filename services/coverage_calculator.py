@@ -88,11 +88,15 @@ class CoverageCalculator:
     ) -> Dict:
         """Get summary statistics."""
         total_area_mm2 = length_mm * width_mm
+
+        def _is_bg(name: str) -> bool:
+            return name == "BACKGROUND" or name.startswith("BACKGROUND_")
+
         printed_area = sum(
-            r["area_mm2"] for r in results if r["name"] != "BACKGROUND"
+            r["area_mm2"] for r in results if not _is_bg(r["name"])
         )
         bg_area = sum(
-            r["area_mm2"] for r in results if r["name"] == "BACKGROUND"
+            r["area_mm2"] for r in results if _is_bg(r["name"])
         )
 
         return {

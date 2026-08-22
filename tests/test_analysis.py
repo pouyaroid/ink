@@ -208,10 +208,12 @@ def main():
     )
 
     # Test 4: Anti-aliased edges
+    # Ground truth: filled circle r=200 -> pi*200^2 = 125,664 px of 480,000
+    # = 26.18% red; remainder 73.82% black.
     img = create_test_image_with_antialiasing()
     results["anti_aliasing"] = run_test(
         "Anti-aliased Edges", img, 3,
-        {"RED": (15, 25), "BLACK": (50, 65)}
+        {"RED": (25, 28), "BLACK": (72, 75)}
     )
 
     # Test 5: JPEG compressed
@@ -222,17 +224,22 @@ def main():
     )
 
     # Test 6: Background surrounding carton
+    # Ground truth: each printed square is cv2.rectangle inclusive
+    # (201 x 201 = 40,401 px) of 800,000 = 5.05%.
     img = create_test_image_with_background()
     results["background_carton"] = run_test(
         "Background Carton", img, 6,
-        {"BLUE": (8, 18), "RED": (8, 18), "YELLOW": (8, 18)}
+        {"BLUE": (4.5, 6), "RED": (4.5, 6), "YELLOW": (4.5, 6)}
     )
 
     # Test 7: Small details
+    # Ground truth: 20 vertical + 15 horizontal 1-px lines at 40-px pitch
+    # minus 300 intersections ~= 23,700 px of 480,000 = 4.94% gray; the
+    # ten r=5 red dots (~780 px) are below cluster resolution.
     img = create_test_image_small_details()
     results["small_details"] = run_test(
         "Small Details", img, 4,
-        {"GRAY": (60, 80), "WHITE": (15, 30)}
+        {"GRAY": (4, 7), "WHITE": (92, 96)}
     )
 
     # Summary
