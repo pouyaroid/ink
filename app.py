@@ -96,12 +96,13 @@ async def upload_image(file: UploadFile = File(...)):
     filename = f"{uuid.uuid4().hex}{ext}"
     filepath = UPLOAD_DIR / filename
 
-    contents = await file.read()
     with open(filepath, "wb") as f:
-        f.write(contents)
+        while chunk := await file.read(65536):
+            f.write(chunk)
 
     image = processor.load_image(str(filepath))
     dims = processor.get_image_dimensions(image)
+    del image
 
     return {
         "filename": filename,
@@ -125,13 +126,12 @@ def _get_dominant_color(image: np.ndarray) -> tuple:
     """
     h, w = image.shape[:2]
     bw = max(1, int(min(h, w) * 0.05))
-    ring = np.zeros((h, w), dtype=bool)
-    ring[:bw, :] = True
-    ring[h - bw:, :] = True
-    ring[:, :bw] = True
-    ring[:, w - bw:] = True
 
-    border = image[ring].astype(np.int32)
+    top = image[:bw, :, :].reshape(-1, 3)
+    bottom = image[h - bw:, :, :].reshape(-1, 3)
+    left = image[bw:h - bw, :bw, :].reshape(-1, 3)
+    right = image[bw:h - bw, w - bw:, :].reshape(-1, 3)
+    border = np.concatenate([top, bottom, left, right], axis=0).astype(np.int32)
     quantized = (border // 16) * 16
     unique, counts = np.unique(quantized, axis=0, return_counts=True)
     dominant_bin = unique[np.argmax(counts)]
@@ -188,6 +188,7 @@ def analyze_image(
         raise HTTPException(status_code=400, detail="Invalid ROI coordinates")
 
     roi = processor.extract_roi(image, roi_x, roi_y, roi_width, roi_height)
+    del image
 
     roi_processed = processor.preprocess(
         roi,
@@ -196,6 +197,7 @@ def analyze_image(
         gaussian_ksize=gaussian_ksize,
         median_ksize=median_ksize,
     )
+    del roi
 
     num_colors = max(2, min(12, num_colors))
 
@@ -212,6 +214,7 @@ def analyze_image(
         background_color=bg_color,
         background_tolerance=background_tolerance,
     )
+    del roi_processed
 
     results = calculator.calculate_areas(
         analysis["clusters"],
@@ -225,6 +228,7 @@ def analyze_image(
     seg_filename = f"seg_{filename}"
     seg_path = session_dir / seg_filename
     cv2.imwrite(str(seg_path), analysis["segmentation_preview"])
+    del analysis["segmentation_preview"]
 
     masks = {}
     for i, cluster in enumerate(analysis["clusters"]):
@@ -232,6 +236,7 @@ def analyze_image(
         mask_path = session_dir / mask_filename
         cv2.imwrite(str(mask_path), cluster.mask)
         masks[cluster.label] = f"/sessions/{session_id}/{mask_filename}"
+        cluster.mask = None
 
     def to_native(val):
         if isinstance(val, (np.integer,)):

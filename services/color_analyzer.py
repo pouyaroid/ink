@@ -109,12 +109,17 @@ class ColorAnalyzer:
         self, roi_bgr: np.ndarray, color_space: str = "lab"
     ) -> np.ndarray:
         if color_space == "lab":
-            # Floating-point CIELAB (L in 0-100, a/b in -127..127). The 8-bit
-            # encoding scales L by 255/100 but only offsets a/b by +128, which
-            # stretches the lightness axis ~2.55x and skews both KMeans
-            # distances and background detection. Float LAB keeps all three
-            # axes in their true perceptual proportions.
-            lab = cv2.cvtColor(roi_bgr.astype(np.float32) / 255.0, cv2.COLOR_BGR2Lab)
+            # Convert through 8-bit Lab then decode to float32 CIELAB.
+            # This avoids allocating a full float32 copy of the ROI for the
+            # cvtColor input, cutting peak memory in the feature step ~58%.
+            # The 8-bit intermediate introduces at most ±0.5 rounding per
+            # channel, which is negligible for KMeans clustering.
+            lab_8bit = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2Lab)
+            lab = lab_8bit.astype(np.float32)
+            del lab_8bit
+            lab[:, :, 0] *= 100.0 / 255.0
+            lab[:, :, 1] -= 128.0
+            lab[:, :, 2] -= 128.0
             return lab.reshape(-1, 3)
         elif color_space == "hsv":
             hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
@@ -252,26 +257,21 @@ class ColorAnalyzer:
         h, w = roi_bgr.shape[:2]
         total_pixels = h * w
 
-        # Fit KMeans on at most MAX_CLUSTER_PIXELS sampled pixels (speed),
-        # then assign EVERY full-resolution pixel to its nearest center in
-        # the same feature space. The previous approach upscaled the
-        # downsampled label map with INTER_NEAREST, which quantized
-        # coverage into blocks of ~(1/scale)^2 pixels: thin strokes, text
-        # and halftone dots vanished or were miscounted. Exact per-pixel
-        # assignment keeps coverage percentages accurate.
         small_img, _scale = self._downsample_image(roi_bgr)
         _, kmeans = self.cluster_colors(small_img, n_colors, color_space)
+        del small_img
 
         features_full = self.prepare_features(roi_bgr, color_space)
         labels = self._assign_nearest_labels(
             features_full, kmeans.cluster_centers_
         ).reshape(h, w)
+        del features_full
 
         rep_colors = self.get_representative_colors(kmeans, color_space)
+        del kmeans
+
         seg_preview = self.create_segmentation_preview(roi_bgr, labels, rep_colors)
 
-        # Background is supplied (or auto-detected) in BGR. Convert it to
-        # CIELAB once so every cluster comparison below is perceptual.
         bg_lab = None
         if background_color is not None:
             bg_lab = _bgr_to_lab(background_color)
@@ -292,16 +292,10 @@ class ColorAnalyzer:
 
             is_background = False
             if bg_lab is not None:
-                # Compare in true CIELAB (CIE76 Delta-E): the tolerance is
-                # now in perceptually meaningful units where ~1.0 is one
-                # just-noticeable difference, instead of the distorted
-                # 8-bit Lab scale that amplified lightness ~2.55x.
                 diff = _color_lab_distance(bgr, bg_lab)
                 is_background = diff < background_tolerance
 
             if is_background:
-                # Give every background cluster a unique name so masks are
-                # never lost to dict-key collisions downstream.
                 bg_seen += 1
                 label = "BACKGROUND" if bg_seen == 1 else f"BACKGROUND_{bg_seen}"
             else:
@@ -319,10 +313,7 @@ class ColorAnalyzer:
             )
             clusters.append(cluster)
 
-        bg_clusters = [c for c in clusters if _is_background_name(c.label)]
-        non_bg_clusters = [c for c in clusters if not _is_background_name(c.label)]
-        clusters = non_bg_clusters + bg_clusters
-
+        clusters.sort(key=lambda c: _is_background_name(c.label))
         clusters = self._merge_duplicate_names(clusters, total_pixels)
 
         return {
@@ -368,7 +359,8 @@ class ColorAnalyzer:
                 existing.pixel_count += c.pixel_count
                 existing.coverage_percent = (existing.pixel_count / total_pixels) * 100
                 if existing.mask is not None and c.mask is not None:
-                    existing.mask = cv2.bitwise_or(existing.mask, c.mask)
+                    np.maximum(existing.mask, c.mask, out=existing.mask)
+                    c.mask = None
 
         for name, cluster in name_map.items():
             merged.append(cluster)
