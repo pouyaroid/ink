@@ -5,8 +5,9 @@
 }
 
 body {
-    font-family: 'Tahoma', 'Segoe UI', sans-serif;
-    background: #1a1a2e;
+    font-family: 'Vazir';
+    src: url('/static/fonts/Vazir.woff2') format('woff2');
+    background: #e7e7e7f7;
     color: #e0e0e0;
     line-height: 1.8;
     direction: rtl;
@@ -68,7 +69,7 @@ header h1 {
 
 /* Upload */
 .upload-area {
-    border: 2px dashed #1a3a5c;
+    border: 2px dashed #ffffff;
     border-radius: 8px;
     padding: 40px;
     text-align: center;
